@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RippleFade</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin:0; height:100%; background:#111; color:#ddd; font:13px/1.4 system-ui, sans-serif; overflow:hidden; }
+  #stage { position:fixed; inset:0; display:block; cursor:crosshair; }
+  #panel {
+    position:fixed; top:12px; left:12px; width:240px; padding:12px 14px;
+    background:rgba(20,20,20,.82); backdrop-filter:blur(8px); border:1px solid #333; border-radius:10px;
+    user-select:none;
+  }
+  #panel h1 { font-size:14px; margin:0 0 6px; letter-spacing:.04em; }
+  #panel p  { margin:0 0 10px; color:#999; font-size:12px; }
+  label { display:grid; grid-template-columns:1fr auto; gap:2px 8px; margin:6px 0; font-size:12px; }
+  label span.v { color:#8cf; font-variant-numeric:tabular-nums; }
+  label input[type=range] { grid-column:1 / span 2; width:100%; }
+  .row { display:flex; gap:6px; margin-top:8px; }
+  button, .file { flex:1; background:#222; color:#ddd; border:1px solid #444; border-radius:6px; padding:6px 8px; font-size:12px; cursor:pointer; text-align:center; }
+  button:hover, .file:hover { background:#2c2c2c; }
+  .file input { display:none; }
+  #panel.collapsed > :not(h1) { display:none; }
+  #panel h1 { cursor:pointer; }
+  #drop { position:fixed; inset:0; display:none; place-items:center; background:rgba(0,120,255,.25); border:4px dashed #6bf; font-size:24px; pointer-events:none; }
+  body.dragging #drop { display:grid; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="drop">Drop image → A (left half) / B (right half)</div>
+
+<div id="panel">
+  <h1 title="click to collapse">RippleFade</h1>
+  <p>Click anywhere to drop a ripple that transitions A → B.</p>
+
+  <label>Ripples <span class="v" id="v-rings"></span><input type="range" id="rings" min="1" max="8" step="1" value="4"></label>
+  <label>Wavelength <span class="v" id="v-wave"></span><input type="range" id="wave" min="0.03" max="0.4" step="0.005" value="0.14"></label>
+  <label>Speed <span class="v" id="v-speed"></span><input type="range" id="speed" min="0.1" max="2" step="0.05" value="0.55"></label>
+  <label>Ripple strength <span class="v" id="v-amp"></span><input type="range" id="amp" min="0" max="1" step="0.01" value="0.9"></label>
+  <label>Refraction <span class="v" id="v-refr"></span><input type="range" id="refr" min="0" max="0.06" step="0.001" value="0.018"></label>
+  <label>Sheen <span class="v" id="v-sheen"></span><input type="range" id="sheen" min="0" max="1" step="0.01" value="0.35"></label>
+  <label>Edge softness <span class="v" id="v-soft"></span><input type="range" id="soft" min="0.05" max="1" step="0.01" value="0.45"></label>
+
+  <div class="row">
+    <label class="file">Image A<input type="file" id="fileA" accept="image/*"></label>
+    <label class="file">Image B<input type="file" id="fileB" accept="image/*"></label>
+  </div>
+  <div class="row">
+    <button id="swap">Swap A/B</button>
+    <button id="reset">Reset</button>
+  </div>
+</div>
+
+<script>
+// ---------- WebGL setup ----------
+const canvas = document.getElementById('stage');
+const gl = canvas.getContext('webgl', { antialias:false, premultipliedAlpha:false });
+if (!gl) { document.body.innerHTML = '<p style="padding:20px">WebGL not available.</p>'; throw new Error('no webgl'); }
+
+const VS = `
+attribute vec2 p; varying vec2 vUv;
+void main(){ vUv = p*0.5+0.5; vUv.y = 1.0 - vUv.y; gl_Position = vec4(p,0.,1.); }`;
+
+const FS = `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D texA, texB;
+uniform vec2  uRes, uImgA, uImgB;     // canvas size, image sizes (for cover-fit)
+uniform vec2  uCenter;                // click point in uv (0..1)
+uniform float uFront;                 // current wavefront radius (in aspect-corrected units)
+uniform float uRings, uWave, uAmp, uRefr, uSheen, uSoft;
+uniform float uActive;                // 0 = idle (show A), 1 = rippling
+
+const float PI = 3.14159265;
+
+// cover-fit sampling so arbitrary image aspect ratios fill the canvas
+vec2 coverUv(vec2 uv, vec2 img){
+  float ca = uRes.x/uRes.y, ia = img.x/img.y;
+  vec2 s = (ca > ia) ? vec2(1.0, ia/ca) : vec2(ca/ia, 1.0);
+  return (uv - 0.5) * s + 0.5;
+}
+
+void main(){
+  // aspect-corrected coordinates so ripples are circular
+  vec2 asp = vec2(uRes.x/uRes.y, 1.0);
+  vec2 q = vUv*asp, c = uCenter*asp;
+  vec2 dir = q - c;
+  float d = length(dir);
+  vec2 n = d > 1e-5 ? dir/d : vec2(0.0);
+
+  // phase = how many wavelengths this pixel is *behind* the wavefront.
+  // <0 : ripple hasn't arrived, still image A.   >= rings : fully image B.
+  float phase = (uFront - d) / uWave;
+  float m = clamp(phase / uRings, 0.0, 1.0);           // monotone progress 0..1 across the ring train
+
+  // oscillation: crest (+) reveals more of B, trough (-) pulls back toward A.
+  // amplitude dies out as m->1 so the last ripple lands exactly on B; the
+  // first ripple leads with a crest so B "blooms" at the front.
+  float env  = (1.0 - m) * m * 4.0;                    // bell envelope: 0 at both ends, 1 in middle
+  env = pow(env, uSoft);
+  float wave = sin(phase * 2.0*PI - PI*0.5);           // -1 at the front edge, crest one half-wave in
+  float blend = m + uAmp * 0.5 * env * wave;
+  // keep the leading edge gentle: fade in over the first half wave
+  float lead = smoothstep(0.0, 0.5, phase);
+  blend = clamp(blend, 0.0, 1.0) * lead;
+  blend *= uActive;
+
+  // water-like refraction: displace lookup along the radial direction by
+  // the slope of the surface (cos of the phase), fading with the same envelope.
+  float slope = cos(phase * 2.0*PI) * env * lead * uActive;
+  vec2 off = n * slope * uRefr / asp;
+
+  vec3 a = texture2D(texA, coverUv(vUv + off, uImgA)).rgb;
+  vec3 b = texture2D(texB, coverUv(vUv + off, uImgB)).rgb;
+  vec3 col = mix(a, b, blend);
+
+  // subtle specular sheen on crests
+  col += uSheen * 0.25 * max(slope, 0.0) * (1.0 - blend*0.5);
+
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+function shader(type, src){
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(prog, 'p');
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+const U = {};
+for (const name of ['texA','texB','uRes','uImgA','uImgB','uCenter','uFront','uRings','uWave','uAmp','uRefr','uSheen','uSoft','uActive'])
+  U[name] = gl.getUniformLocation(prog, name);
+
+// ---------- textures ----------
+function makeTexture(unit){
+  const t = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  return t;
+}
+const tex = [makeTexture(0), makeTexture(1)];
+const imgSize = [[1,1],[1,1]];
+gl.uniform1i(U.texA, 0);
+gl.uniform1i(U.texB, 1);
+
+function upload(unit, source){
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, tex[unit]);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+  imgSize[unit] = [source.width, source.height];
+}
+
+// Procedural demo images so the page works with no assets.
+function demoImage(kind){
+  const w = 1024, h = 640, cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const x = cv.getContext('2d');
+  if (kind === 0){
+    const g = x.createLinearGradient(0,0,w,h); g.addColorStop(0,'#0b2a4a'); g.addColorStop(1,'#1f6f8b');
+    x.fillStyle = g; x.fillRect(0,0,w,h);
+    x.fillStyle = 'rgba(255,255,255,.08)';
+    for (let i=0;i<40;i++){ x.beginPath(); x.arc(Math.random()*w, Math.random()*h, 20+Math.random()*120, 0, 7); x.fill(); }
+    x.fillStyle = '#e8f4ff'; x.font = 'bold 140px system-ui'; x.textAlign='center'; x.textBaseline='middle';
+    x.fillText('NIGHT', w/2, h/2);
+  } else {
+    const g = x.createLinearGradient(0,h,w,0); g.addColorStop(0,'#ff9a3c'); g.addColorStop(.6,'#ffd166'); g.addColorStop(1,'#fff3b0');
+    x.fillStyle = g; x.fillRect(0,0,w,h);
+    x.strokeStyle = 'rgba(255,255,255,.35)'; x.lineWidth = 6;
+    for (let i=0;i<14;i++){ x.beginPath(); x.moveTo(0, i*50); x.bezierCurveTo(w/3, i*50+80, 2*w/3, i*50-80, w, i*50); x.stroke(); }
+    x.fillStyle = '#3a2400'; x.font = 'bold 140px system-ui'; x.textAlign='center'; x.textBaseline='middle';
+    x.fillText('DAY', w/2, h/2);
+  }
+  return cv;
+}
+upload(0, demoImage(0));
+upload(1, demoImage(1));
+
+function loadFile(unit, file){
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => { upload(unit, img); URL.revokeObjectURL(img.src); };
+  img.src = URL.createObjectURL(file);
+}
+document.getElementById('fileA').onchange = e => loadFile(0, e.target.files[0]);
+document.getElementById('fileB').onchange = e => loadFile(1, e.target.files[0]);
+
+// drag & drop: left half -> A, right half -> B
+let dragDepth = 0;
+window.addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
+window.addEventListener('dragover',  e => e.preventDefault());
+window.addEventListener('dragleave', e => { if (--dragDepth <= 0){ dragDepth = 0; document.body.classList.remove('dragging'); } });
+window.addEventListener('drop', e => {
+  e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging');
+  const f = e.dataTransfer.files[0]; if (!f || !f.type.startsWith('image/')) return;
+  loadFile(e.clientX < innerWidth/2 ? 0 : 1, f);
+});
+
+// ---------- controls ----------
+const params = {};
+for (const id of ['rings','wave','speed','amp','refr','sheen','soft']){
+  const el = document.getElementById(id), out = document.getElementById('v-'+id);
+  const sync = () => { params[id] = +el.value; out.textContent = el.value; };
+  el.addEventListener('input', sync); sync();
+}
+document.getElementById('panel').querySelector('h1').onclick = () =>
+  document.getElementById('panel').classList.toggle('collapsed');
+
+// ---------- ripple state ----------
+let ripple = null;   // { cx, cy, t0 }
+let swapPending = false;
+
+function swapImages(){
+  // swap texture units: rebind so A<->B
+  [tex[0], tex[1]] = [tex[1], tex[0]];
+  [imgSize[0], imgSize[1]] = [imgSize[1], imgSize[0]];
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex[0]);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tex[1]);
+}
+
+canvas.addEventListener('pointerdown', e => {
+  if (ripple) return;          // one drop at a time; finish the current transition first
+  const r = canvas.getBoundingClientRect();
+  ripple = { cx:(e.clientX - r.left)/r.width, cy:(e.clientY - r.top)/r.height, t0: performance.now() };
+});
+document.getElementById('swap').onclick = () => { if (!ripple) swapImages(); };
+document.getElementById('reset').onclick = () => { ripple = null; };
+
+// ---------- render loop ----------
+function resize(){
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const w = Math.floor(innerWidth*dpr), h = Math.floor(innerHeight*dpr);
+  if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; gl.viewport(0,0,w,h); }
+}
+
+function frame(now){
+  resize();
+  const asp = canvas.width / canvas.height;
+  let front = 0, active = 0, cx = 0.5, cy = 0.5;
+
+  if (ripple){
+    active = 1; cx = ripple.cx; cy = ripple.cy;
+    front = ((now - ripple.t0)/1000) * params.speed;
+    // farthest corner distance from the click, in aspect-corrected units
+    const fx = Math.max(cx, 1-cx)*asp, fy = Math.max(cy, 1-cy);
+    const maxD = Math.hypot(fx, fy);
+    if (front > maxD + params.rings*params.wave){
+      // transition complete: B is now fully visible -> make it the new A
+      swapImages(); ripple = null; active = 0;
+    }
+  }
+
+  gl.uniform2f(U.uRes, canvas.width, canvas.height);
+  gl.uniform2f(U.uImgA, imgSize[0][0], imgSize[0][1]);
+  gl.uniform2f(U.uImgB, imgSize[1][0], imgSize[1][1]);
+  gl.uniform2f(U.uCenter, cx, cy);
+  gl.uniform1f(U.uFront, front);
+  gl.uniform1f(U.uActive, active);
+  gl.uniform1f(U.uRings, params.rings);
+  gl.uniform1f(U.uWave, params.wave);
+  gl.uniform1f(U.uAmp, params.amp);
+  gl.uniform1f(U.uRefr, params.refr);
+  gl.uniform1f(U.uSheen, params.sheen);
+  gl.uniform1f(U.uSoft, params.soft);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
