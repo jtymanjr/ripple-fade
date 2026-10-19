@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>In-page · Harbor Studio</title>
+<script src="../ripple-fade.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <a class="brand" href="index.html">Harbor Studio</a>
+  <nav><a href="index.html">Home</a><a href="gallery.html">Gallery</a><a href="journal.html">Journal</a><a href="spa.html" aria-current="page">In-page</a></nav>
+</header>
+<main id="view">
+  <h1>Same document</h1>
+  <p class="lede">For single-page apps: <code>RippleFade.transition(updateDom, {x, y})</code> snapshots the view, lets you change the DOM underneath, then ripples. These buttons swap the theme and content without loading a page.</p>
+  <div class="row">
+    <button class="btn" data-theme="dark">Go dark</button>
+    <button class="btn ghost" data-theme="dusk">Go dusk</button>
+    <button class="btn ghost" data-theme="">Go light</button>
+  </div>
+  <pre>document.querySelector('button').onclick = e =&gt;
+  RippleFade.transition(() =&gt; render(nextView), { x: e.clientX, y: e.clientY });</pre>
+  <p id="count">Swaps so far: 0</p>
+</main>
+<script>
+  let n = 0;
+  document.querySelectorAll('[data-theme]').forEach((b) => {
+    b.addEventListener('click', (e) => {
+      RippleFade.transition(() => {
+        document.documentElement.className = b.dataset.theme;
+        document.getElementById('count').textContent = 'Swaps so far: ' + ++n;
+      }, { x: e.clientX, y: e.clientY });
+    });
+  });
+</script>
+</body>
+</html>
