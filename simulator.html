@@ -21,7 +21,9 @@
   button, .file { flex:1; background:#222; color:#ddd; border:1px solid #444; border-radius:6px; padding:6px 8px; font-size:12px; cursor:pointer; text-align:center; }
   button:hover, .file:hover { background:#2c2c2c; }
   .file input { display:none; }
-  #panel.collapsed > :not(h1) { display:none; }
+  #panel.collapsed > :not(h1):not(.home) { display:none; }
+  .home { display:block; color:#999; text-decoration:none; font-size:11px; margin:0 0 6px; }
+  .home:hover { color:#8cf; }
   #panel h1 { cursor:pointer; }
   #drop { position:fixed; inset:0; display:none; place-items:center; background:rgba(0,120,255,.25); border:4px dashed #6bf; font-size:24px; pointer-events:none; }
   body.dragging #drop { display:grid; }
@@ -32,6 +34,7 @@
 <div id="drop">Drop image → A (left half) / B (right half)</div>
 
 <div id="panel">
+  <a class="home" href="./">← All experiments</a>
   <h1 title="click to collapse">RippleFade</h1>
   <p>Click anywhere to drop a ripple that transitions A → B.</p>
 
