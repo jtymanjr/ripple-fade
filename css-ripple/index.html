@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ripple fade, CSS only</title>
+<style>
+    /* Prototype: the ripple fade with no WebGL. The browser snapshots the old page (View Transitions API); the rings are
+       an animated radial-gradient mask on that snapshot and a white radial-gradient sheen above it. Both gradients sample
+       the same 1D profile as the shader, so the fade matches; what is lost is refraction (the old page is not bent).
+       Lighting: the ring surface is lit from one direction. Its brightness is slope(phase) * cos(angle to the light), a
+       radial gradient (moving) times a conic gradient (fixed for the whole transition), multiplied with mask-composite:
+       intersect. Each sign combination is its own layer: white where the product is positive, black where negative.
+       Refraction: an SVG feDisplacementMap filter on the old snapshot. Its map (x offset in red, y in green) is prebaked
+       on click at low resolution for every frame, then swapped in step with the mask animation. */
+    @property --rf-front { syntax: '<number>'; inherits: true; initial-value: 0; }
+    @keyframes rf-front { from { --rf-front: 0; } to { --rf-front: var(--rf-end); } }
+
+    ::view-transition-old(root), ::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
+    ::view-transition-old(root) {
+        z-index: 1;
+        animation: rf-front var(--rf-dur) linear both;
+    }
+    .rf-layer { position: fixed; inset: 0; pointer-events: none; }
+
+    body { margin: 0; font: 16px/1.5 system-ui, sans-serif; min-height: 100vh; cursor: pointer; }
+    .page { min-height: 100vh; padding: 48px 32px; box-sizing: border-box; }
+    .page h1 { font-size: 56px; margin: 0 0 16px; letter-spacing: -1px; }
+    .page p { max-width: 560px; font-size: 18px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; margin-top: 32px; }
+    .grid div { height: 140px; border-radius: 12px; }
+    .a { background: #f3efe6; color: #2a2620; }
+    .a .grid div:nth-child(odd) { background: #d9a441; } .a .grid div:nth-child(even) { background: #2f6f73; }
+    .b { background: #12182b; color: #e8ecf8; }
+    .b .grid div { background: linear-gradient(135deg, #6a5cff, #ff6fa8); }
+    .b .grid div:nth-child(3n) { background: linear-gradient(135deg, #20c3a0, #2a7fff); }
+    .note { position: fixed; right: 16px; bottom: 16px; font-size: 13px; opacity: .7; }
+    .back { position: fixed; left: 16px; bottom: 16px; font-size: 13px; opacity: .7; mix-blend-mode: difference; color: #fff; }
+    .back:hover { opacity: 1; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <filter id="rf-refract" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB">
+        <feImage id="rf-map" preserveAspectRatio="none" width="100%" height="100%" result="map"/>
+        <feDisplacementMap id="rf-disp" in="SourceGraphic" in2="map" scale="0" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+</svg>
+<div id="app"></div>
+<div class="note" id="note"></div>
+<a class="back" href="../">← All experiments</a>
+<script>
+(function () {
+    // tuned simulator values, same as ripple-fade.js
+    var P = { rings: 2, wavelength: 0.245, speed: 2, strength: 0.9, refraction: 0.043, sheen: 0.87, softness: 0.8 };
+    // refraction maps: width in pixels (the offsets are smooth, so a coarse map scaled up loses nothing visible) and fps
+    var R = { on: !/[?&]refract=0/.test(location.search), width: 160, fps: 60 };
+    // directional light: angle the light comes from (0 = top, clockwise, like conic-gradient), and layer strengths.
+    // ambient keeps a little of the original all-round sheen so the far side of each ring is not dead.
+    var L = { on: !/[?&]light=0/.test(location.search), angle: 315, highlight: 0.55, shadow: 0.4, ambient: 0.35 };
+    var STEPS = 64; // gradient stops per ring train; the shader profile is smooth, so this is visually exact
+
+    // The shader, reduced to one dimension: every value depends only on phase = (front - d) / wavelength.
+    function profile(phase) {
+        var m = Math.min(Math.max(phase / P.rings, 0), 1);
+        var env = Math.pow(Math.max((1 - m) * m * 4, 0), P.softness);
+        var t = Math.min(Math.max(phase / 0.5, 0), 1), lead = t * t * (3 - 2 * t);
+        var blend = Math.min(Math.max(m + P.strength * 0.5 * env * Math.sin(phase * 2 * Math.PI - Math.PI / 2), 0), 1) * lead;
+        var slope = Math.cos(phase * 2 * Math.PI) * env * lead;
+        var s = Math.min(Math.max(P.sheen * 0.25 * Math.max(slope, 0) * (1 - blend * 0.5), 0), 1);
+        if (L.on) s *= L.ambient;
+        // shader output over page B: A * (1-blend)(1-s) + white * s, so A's mask is (1-blend)(1-s) and the sheen is s
+        return { mask: (1 - blend) * (1 - s), sheen: s, slope: slope * (1 - blend * 0.5), bend: slope };
+    }
+
+    // Radial gradients whose stops ride on --rf-front (in viewport heights, like the shader's aspect-corrected d).
+    function gradients(x, y) {
+        var mask = [], sheen = [], up = [], down = [];
+        for (var i = STEPS; i >= 0; i--) {
+            var phase = (i / STEPS) * P.rings, v = profile(phase);
+            var at = ' calc((var(--rf-front) - ' + (phase * P.wavelength).toFixed(4) + ') * 100vh)';
+            mask.push('rgba(0,0,0,' + v.mask.toFixed(3) + ')' + at);
+            sheen.push('rgba(255,255,255,' + v.sheen.toFixed(3) + ')' + at);
+            up.push('rgba(0,0,0,' + Math.max(v.slope, 0).toFixed(3) + ')' + at);
+            down.push('rgba(0,0,0,' + Math.max(-v.slope, 0).toFixed(3) + ')' + at);
+        }
+        var c = 'circle at ' + x + 'px ' + y + 'px, ';
+        // facing: how much the outward ring normal points at the light, per angle around the click point
+        var toward = [], away = [];
+        for (var a = 0; a <= 360; a += 6) {
+            var f = Math.cos((a - L.angle) * Math.PI / 180);
+            toward.push('rgba(0,0,0,' + Math.max(f, 0).toFixed(3) + ') ' + a + 'deg');
+            away.push('rgba(0,0,0,' + Math.max(-f, 0).toFixed(3) + ') ' + a + 'deg');
+        }
+        var k = 'from 0deg at ' + x + 'px ' + y + 'px, ';
+        var R = function (s) { return 'radial-gradient(' + c + s.join(', ') + ')'; };
+        var C = function (s) { return 'conic-gradient(' + k + s.join(', ') + ')'; };
+        var layers = [{ color: 'rgba(255,255,255,1)', alpha: 1, mask: R(sheen).replace(/255,255,255,/g, '0,0,0,') }];
+        if (L.on) layers.push(
+            { color: '#000', alpha: L.shadow, mask: R(up) + ', ' + C(away) },
+            { color: '#000', alpha: L.shadow, mask: R(down) + ', ' + C(toward) },
+            { color: '#fff', alpha: L.highlight, mask: R(up) + ', ' + C(toward) },
+            { color: '#fff', alpha: L.highlight, mask: R(down) + ', ' + C(away) });
+        return { mask: R(mask), layers: layers };
+    }
+
+    var pages = [
+        '<div class="page a"><h1>Page A</h1><p>Click anywhere. The old page is a browser snapshot, faded by an animated CSS mask in rings, with a CSS sheen on the crests. No canvas, no WebGL, no html2canvas.</p><div class="grid"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div>',
+        '<div class="page b"><h1>Page B</h1><p>Same profile as the shader for the fade and the sheen. Not reproduced: refraction, the slight bending of the old page under each ring.</p><div class="grid"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div>'
+    ];
+    var app = document.getElementById('app'), cur = 0;
+    var rules = document.head.appendChild(document.createElement('style'));
+    app.innerHTML = pages[cur];
+    document.getElementById('note').textContent = document.startViewTransition ? 'View Transitions: yes, light ' + (L.on ? 'on (?light=0 off)' : 'off') + ', refraction ' + (R.on ? 'on (?refract=0 off)' : 'off') : 'No View Transitions: instant swap';
+
+    // Prebakes one displacement map per frame. Offset in pixels = ring normal * slope * refraction * viewport height,
+    // exactly the shader's sample offset; red/green hold x/y around 0.5, and feDisplacementMap's scale maps them back.
+    var maps = [], mapEnd = 1, disp = document.getElementById('rf-disp'), mapEl = document.getElementById('rf-map');
+    function refract(x, y, end) {
+        var W = innerWidth, H = innerHeight, mw = R.width, mh = Math.max(1, Math.round(mw * H / W));
+        var maxPx = P.refraction * H, LUT = 1024, bend = new Float32Array(LUT + 1);
+        for (var i = 0; i <= LUT; i++) bend[i] = profile((i / LUT) * P.rings).bend;
+        var cv = document.createElement('canvas'); cv.width = mw; cv.height = mh;
+        var ctx = cv.getContext('2d'), img = ctx.createImageData(mw, mh), px = img.data;
+        var n = mw * mh, dist = new Float32Array(n), nx = new Float32Array(n), ny = new Float32Array(n);
+        // how far each map cell may shift before it would sample off the page (the shader clamps there instead)
+        var lox = new Float32Array(n), hix = new Float32Array(n), loy = new Float32Array(n), hiy = new Float32Array(n);
+        for (var j = 0; j < mh; j++) for (var k = 0; k < mw; k++) {
+            var dx = ((k + 0.5) / mw * W - x) / H, dy = ((j + 0.5) / mh * H - y) / H, d = Math.hypot(dx, dy), q = j * mw + k;
+            dist[q] = d; nx[q] = d > 1e-5 ? dx / d : 0; ny[q] = d > 1e-5 ? dy / d : 0;
+            lox[q] = -k / mw * W / maxPx; hix[q] = (W - (k + 1) / mw * W) / maxPx;
+            loy[q] = -j / mh * H / maxPx; hiy[q] = (H - (j + 1) / mh * H) / maxPx;
+        }
+        var frames = Math.max(2, Math.ceil(end / P.speed * R.fps));
+        maps = [];
+        for (var f = 0; f < frames; f++) {
+            var front = end * f / (frames - 1);
+            for (var q2 = 0; q2 < dist.length; q2++) {
+                var phase = (front - dist[q2]) / P.wavelength, b = 0;
+                if (phase > 0 && phase < P.rings) b = bend[Math.round(phase / P.rings * LUT)];
+                var ox = Math.min(Math.max(nx[q2] * b, lox[q2]), hix[q2]), oy = Math.min(Math.max(ny[q2] * b, loy[q2]), hiy[q2]);
+                px[q2 * 4] = 127.5 + 127.5 * ox; px[q2 * 4 + 1] = 127.5 + 127.5 * oy;
+                px[q2 * 4 + 2] = 128; px[q2 * 4 + 3] = 255;
+            }
+            ctx.putImageData(img, 0, 0);
+            maps.push(cv.toDataURL());
+        }
+        disp.setAttribute('scale', (2 * maxPx).toFixed(2));
+        mapEl.setAttribute('href', maps[0]);
+        rules.textContent += '::view-transition-old(root){filter:url(#rf-refract)}';
+    }
+    // Shows the map for the mask animation's current time, so a paused or slowed animation stays in step.
+    function playMaps(vt) {
+        var anim = document.getAnimations().filter(function (a) {
+            return a.effect && a.effect.pseudoElement === '::view-transition-old(root)';
+        })[0], shown = -1, done = false;
+        vt.finished.finally(function () { done = true; });
+        (function tick() {
+            if (done || !anim) return;
+            var t = anim.effect.getComputedTiming().progress || 0, i = Math.min(maps.length - 1, Math.round(t * (maps.length - 1)));
+            if (i !== shown) { mapEl.setAttribute('href', maps[i]); shown = i; }
+            requestAnimationFrame(tick);
+        })();
+    }
+
+    window.rippleTo = function (x, y, opts) {
+        opts = opts || {};
+        var swap = function () { cur = 1 - cur; app.innerHTML = pages[cur]; };
+        if (!document.startViewTransition || matchMedia('(prefers-reduced-motion: reduce)').matches) return swap();
+        var h = innerHeight, asp = innerWidth / h, u = x / innerWidth, v = y / h;
+        var maxD = Math.hypot(Math.max(u, 1 - u) * asp, Math.max(v, 1 - v));
+        var end = maxD + P.rings * P.wavelength, speed = opts.speed || P.speed;
+        var g = gradients(x, y), root = document.documentElement.style;
+        // set on the pseudo-elements themselves: a var() inside a custom property would resolve --rf-front on :root,
+        // where it never animates
+        var css = '::view-transition-old(root){-webkit-mask-image:' + g.mask + ';mask-image:' + g.mask + '}';
+        g.layers.forEach(function (l, i) {
+            var sel = '(rf-l' + i + ')';
+            css += '::view-transition-group' + sel + '{z-index:' + (2 + i) + ';animation:rf-front var(--rf-dur) linear both;' +
+                'background:' + l.color + ';opacity:' + l.alpha + ';-webkit-mask-image:' + l.mask + ';mask-image:' + l.mask +
+                ';-webkit-mask-composite:source-in;mask-composite:intersect}' +
+                '::view-transition-old' + sel + ',::view-transition-new' + sel + '{animation:none;opacity:0}';
+        });
+        rules.textContent = css;
+        root.setProperty('--rf-end', end.toFixed(4));
+        root.setProperty('--rf-dur', (end / speed).toFixed(3) + 's');
+        // one empty full-screen element per layer, so each gets its own view-transition group to paint on
+        if (R.on) refract(x, y, end);
+        var els = [];
+        var vt = document.startViewTransition(function () {
+            swap();
+            g.layers.forEach(function (l, i) {
+                var el = document.body.appendChild(document.createElement('div'));
+                el.className = 'rf-layer';
+                el.style.viewTransitionName = 'rf-l' + i;
+                els.push(el);
+            });
+        });
+        vt.finished.finally(function () { els.forEach(function (el) { el.remove(); }); });
+        if (R.on) vt.ready.then(function () { playMaps(vt); });
+        return vt;
+    };
+    document.addEventListener('click', function (e) { if (!e.target.closest('a')) rippleTo(e.clientX, e.clientY); });
+})();
+</script>
+</body>
+</html>
