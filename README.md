@@ -2,19 +2,20 @@
 
 A ripple transition: drop a ripple on a surface and it carries image A into image B, ring by ring.
 
-- **Scenarios** (`index.html`): the ripple on water, a phone, a gallery wall, a planet, a full-screen sci-fi console and twin forests. You can switch render styles (ASCII, low-poly dither, topo map, ridgelines, slices) and toggle effects. Built with three.js, loaded from jsDelivr.
+- **Scenarios** (`scenarios.html`): the ripple on water, a phone, a gallery wall, a planet, a full-screen sci-fi console and twin forests. You can switch render styles (ASCII, low-poly dither, topo map, ridgelines, slices) and toggle effects. Built with three.js, loaded from jsDelivr.
 - **Simulator** (`simulator.html`): the original 2D RippleFade tuner with sliders, where you can load your own A and B images.
 - **Page transitions** (`ripple-fade.js`, demo in `demo/`): a drop-in script that plays the RippleFade between the pages of a site. See below.
 - **CSS ripple, no WebGL** (`css-ripple/`): the same ripple without a canvas. The browser snapshots the old view (View Transitions API), animated radial-gradient masks fade it out in rings, highlight and shadow layers light the rings from one side, and an SVG displacement filter driven by small maps baked on click adds the refraction. Add `?light=0` or `?refract=0` to compare. Tested in Chrome; browsers without View Transitions swap pages instantly.
 
 The pages are self-contained HTML files with no build step. Open them directly, or view them on GitHub Pages:
 
-- https://jtymanjr.github.io/ripple-fade/
+- https://jtymanjr.github.io/ripple-fade/ (the experiments page, linking all of them)
+- https://jtymanjr.github.io/ripple-fade/scenarios.html
 - https://jtymanjr.github.io/ripple-fade/simulator.html
 - https://jtymanjr.github.io/ripple-fade/demo/
 - https://jtymanjr.github.io/ripple-fade/css-ripple/
 
-The Experiments section of the Scenarios panel links them all. Controls: click a surface to drop a ripple, press <kbd>Space</kbd> to drop at the centre, and use <kbd>←</kbd> <kbd>→</kbd> to change scenario.
+`index.html` is a small landing page that describes each experiment and links to it; every experiment links back. Scenarios controls: click a surface to drop a ripple, press <kbd>Space</kbd> to drop at the centre, and use <kbd>←</kbd> <kbd>→</kbd> to change scenario.
 
 ## Page transitions
 
